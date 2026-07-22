@@ -142,4 +142,26 @@ public class WorkerSignatureTests
         added.Workers.Add(new WhisperWorker { Id = "c", ApiUrl = "http://z:7070", MaxConcurrency = 1 });
         Assert.NotEqual(baseSig, SubtitleQueueService.ComputeWorkersSignature(added));
     }
+
+    [Fact]
+    public void Signature_ChangesWhenRemoteAudioSettingsChange()
+    {
+        var before = new PluginConfiguration();
+        before.Workers.Add(new WhisperWorker { Id = "cloud", ApiUrl = "https://openrouter.ai/api" });
+
+        var after = new PluginConfiguration();
+        after.Workers.Add(new WhisperWorker
+        {
+            Id = "cloud",
+            ApiUrl = "https://openrouter.ai/api",
+            Protocol = "openrouter",
+            AudioFormat = "mp3",
+            ChunkSeconds = 300,
+            AudioBitrateKbps = 48,
+        });
+
+        Assert.NotEqual(
+            SubtitleQueueService.ComputeWorkersSignature(before),
+            SubtitleQueueService.ComputeWorkersSignature(after));
+    }
 }

@@ -352,6 +352,7 @@ namespace WhisperSubs.Api
                 ApiUrl = request.ApiUrl ?? "",
                 ApiKey = request.ApiKey ?? "",
                 Model = request.Model ?? "",
+                Protocol = request.Protocol ?? "auto",
                 MaxConcurrency = 1,
                 CostWeight = 0
             };
@@ -405,7 +406,11 @@ namespace WhisperSubs.Api
             }
 
             var url = worker.ApiUrl.TrimEnd('/') + "/v1/audio/transcriptions";
-            var model = string.IsNullOrWhiteSpace(worker.Model) ? "Systran/faster-whisper-large-v3" : worker.Model.Trim();
+            var isOpenRouter = Providers.RemoteAudioOptions.Resolve(
+                worker.Protocol, worker.ApiUrl, "auto", 0, 64).IsOpenRouter;
+            var model = string.IsNullOrWhiteSpace(worker.Model)
+                ? (isOpenRouter ? "openai/whisper-large-v3" : "Systran/faster-whisper-large-v3")
+                : worker.Model.Trim();
             var wav = Controller.Workers.SyntheticAudio.SilentWav16kMono(100);
 
             // Reachability pre-probe (v4.1.1): before the (potentially slow) transcribe, do a cheap GET of the
@@ -448,12 +453,9 @@ namespace WhisperSubs.Api
                 }
             }
 
-            using var content = new System.Net.Http.MultipartFormDataContent();
-            var fileContent = new System.Net.Http.ByteArrayContent(wav);
-            fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
-            content.Add(fileContent, "file", "test.wav");
-            content.Add(new System.Net.Http.StringContent(model), "model");
-            content.Add(new System.Net.Http.StringContent("srt"), "response_format");
+            using System.Net.Http.HttpContent content = isOpenRouter
+                ? Providers.OpenRouterRequest.CreateContent(wav, model, "wav", "auto")
+                : CreateMultipartProbe(wav, model);
 
             using var probe = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, url) { Content = content };
             if (!string.IsNullOrWhiteSpace(worker.ApiKey))
@@ -503,6 +505,17 @@ namespace WhisperSubs.Api
                 // Never throw — the endpoint contract is an always-shaped {ok, warning, ...} result.
                 sw.Stop();
                 return Ok(new { ok = false, warning = false, latencyMs = sw.ElapsedMilliseconds, message = $"Unreachable: {ex.Message}" });
+            }
+
+            static System.Net.Http.MultipartFormDataContent CreateMultipartProbe(byte[] audio, string requestedModel)
+            {
+                var multipart = new System.Net.Http.MultipartFormDataContent();
+                var fileContent = new System.Net.Http.ByteArrayContent(audio);
+                fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
+                multipart.Add(fileContent, "file", "test.wav");
+                multipart.Add(new System.Net.Http.StringContent(requestedModel), "model");
+                multipart.Add(new System.Net.Http.StringContent("srt"), "response_format");
+                return multipart;
             }
         }
 
@@ -1220,6 +1233,7 @@ namespace WhisperSubs.Api
         public string? ApiUrl { get; set; }
         public string? ApiKey { get; set; }
         public string? Model { get; set; }
+        public string? Protocol { get; set; }
     }
 }
 

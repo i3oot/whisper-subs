@@ -27,7 +27,21 @@ namespace WhisperSubs.Controller.Workers
                 return (false, "Max concurrency must be at least 1.");
             if (worker.CostWeight < 0)
                 return (false, "Cost weight cannot be negative.");
+            if (!IsOneOf(worker.Protocol, "auto", "openai", "openrouter"))
+                return (false, "Protocol must be auto, openai, or openrouter.");
+            if (!IsOneOf(worker.AudioFormat, "auto", "wav", "mp3"))
+                return (false, "Audio format must be auto, wav, or mp3.");
+            if (worker.ChunkSeconds < 0 || worker.ChunkSeconds > 3600)
+                return (false, "Chunk duration must be between 0 and 3600 seconds.");
+            if (worker.AudioBitrateKbps < 16 || worker.AudioBitrateKbps > 320)
+                return (false, "MP3 bitrate must be between 16 and 320 kbit/s.");
             return (true, null);
+        }
+
+        private static bool IsOneOf(string? value, params string[] allowed)
+        {
+            var normalized = (value ?? string.Empty).Trim();
+            return allowed.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>

@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/GeiserX/whisper-subs/releases"><img src="https://img.shields.io/github/v/release/GeiserX/whisper-subs?style=flat-square&logo=github&color=6B4C9A" alt="Release"></a>
-  <a href="https://github.com/GeiserX/whisper-subs/actions/workflows/build-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/GeiserX/whisper-subs/build-release.yml?branch=main&style=flat-square&label=tests" alt="Tests"></a>
+  <a href="https://github.com/i3oot/whisper-subs/releases"><img src="https://img.shields.io/github/v/release/i3oot/whisper-subs?style=flat-square&logo=github&color=6B4C9A" alt="Release"></a>
+  <a href="https://github.com/i3oot/whisper-subs/actions/workflows/build-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/i3oot/whisper-subs/build-release.yml?branch=main&style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://github.com/GeiserX/whisper-subs/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/.NET-9.0-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 9.0">
   <img src="https://img.shields.io/badge/Jellyfin-10.11%2B-6B4C9A?style=flat-square" alt="Jellyfin 10.11+">
@@ -51,7 +51,7 @@
 1. In Jellyfin, go to **Dashboard** > **Plugins** > **Repositories**.
 2. Add a new repository with this URL:
    ```
-   https://geiserx.github.io/whisper-subs/manifest.json
+   https://i3oot.github.io/whisper-subs/manifest.json
    ```
 3. Go to **Catalog**, find **WhisperSubs**, and click **Install**.
 4. Restart Jellyfin.
@@ -376,6 +376,28 @@ The live queue view shows which worker is transcribing which item, so you can se
 
 > **Need a worker to point at?** [`worker/`](worker/README.md) is a ready-to-run whisper.cpp + Vulkan worker image (with notes for CPU/NVIDIA/AMD backends). Any server that implements the OpenAI `/v1/audio/transcriptions` and `/v1/audio/translations` endpoints -- e.g. [Speaches](https://github.com/speaches-ai/speaches) -- also works.
 
+### OpenRouter transcription
+
+OpenRouter's speech-to-text endpoint is supported as a transcription-only worker. Add a worker with:
+
+- **Endpoint URL:** `https://openrouter.ai/api`
+- **API key:** your OpenRouter API key
+- **Model:** for example `openai/whisper-large-v3` (this is also the automatic default)
+- **API protocol:** `Auto-detect` or `OpenRouter`
+- **Upload audio format / chunk duration:** `Automatic`
+
+Automatic mode compresses remote audio to 16 kHz mono MP3 at 64 kbit/s and sends overlapping
+10-minute chunks, keeping every multipart upload below OpenRouter's 25 MB limit. WhisperSubs requests
+`verbose_json`, converts the returned segment timestamps to SRT, offsets each chunk back onto the media
+timeline, and removes overlap duplicates by segment midpoint. OpenRouter does not expose the
+`/audio/translations` route used by WhisperSubs, so OpenRouter workers are always treated as unable to
+perform the optional translate-to-English job.
+
+For another OpenAI-compatible cloud provider with an upload cap, select MP3 and set a chunk duration
+on that worker row. Those providers continue to receive `response_format=srt`; WhisperSubs offsets and
+renumbers each returned chunk before saving the combined subtitle file. Existing worker rows default to
+unchunked WAV, so upgrades do not silently change self-hosted traffic.
+
 > **Note:** the automatic scheduled sweep currently processes its backlog one item at a time; manual **Generate** / **Generate All** already fan out across the whole pool. Parallelizing the scheduled sweep is on the [roadmap](ROADMAP.md).
 
 ## Configuration
@@ -394,7 +416,7 @@ After installation, navigate to **Dashboard** > **Plugins** > **WhisperSubs** to
 | **Whisper Model Path** | *(Advanced)* Absolute path to the GGML model file. Leave empty to use the auto-downloaded model. |
 | **Whisper Thread Count** | *(Advanced)* Number of CPU threads for whisper inference. `0` = whisper default (4). Set to your CPU core count for faster transcription. |
 | **Also use this server as a worker** (`EnableLocalWorker`) | *(Worker Pool)* Whether this Jellyfin host's own whisper participates in the pool. On by default. Turn it off to transcribe **only** on the remote workers below -- e.g. a weak NAS offloading entirely to a beefier box. |
-| **Workers** | *(Worker Pool)* A list of extra OpenAI-compatible transcription endpoints to pool alongside (or instead of) this server. Empty by default. Each row has an endpoint URL, optional API key, optional model, max concurrency, cost weight, and a "can translate" flag. See [Distributed Transcription](#distributed-transcription-worker-pool). |
+| **Workers** | *(Worker Pool)* A list of extra OpenAI-compatible or OpenRouter transcription endpoints to pool alongside (or instead of) this server. Empty by default. Each row includes protocol, upload format, chunk duration, MP3 bitrate, concurrency, cost, and translation capability. See [Distributed Transcription](#distributed-transcription-worker-pool). |
 | **Job timeout -- real-time factor** (`JobTimeoutRealtimeFactor`) | *(Advanced)* Upper bound on how much slower than real-time a remote worker may run before a single call is presumed hung and cancelled. Per-call deadline = audio length x this factor (clamped by the min/max below). Default `6`. A slow-but-working pass is never cut off; a dead endpoint is. |
 | **Job timeout -- minimum seconds** (`JobMinTimeoutSeconds`) | *(Advanced)* Floor for the per-call deadline, so a tiny detection clip still gets a sane minimum. Default `60`. |
 | **Job timeout -- maximum hours** (`JobMaxTimeoutHours`) | *(Advanced)* Absolute cap for the per-call deadline; a genuinely long film's worst case still fits under it. Default `12`. |
