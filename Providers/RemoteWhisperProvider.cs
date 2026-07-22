@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,6 +33,7 @@ namespace WhisperSubs.Providers
         private readonly double _realtimeFactor;
         private readonly int _minTimeoutSeconds;
         private readonly int _maxTimeoutHours;
+        private readonly RemoteAudioOptions _audioOptions;
 
         public string Name => "RemoteWhisper";
 
@@ -40,7 +42,9 @@ namespace WhisperSubs.Providers
 
         [ExcludeFromCodeCoverage(Justification = "Construction + HTTPS-key warning; no unit-testable logic")]
         public RemoteWhisperProvider(ILogger logger, string apiUrl, string model, string apiKey = "",
-            double realtimeFactor = 6.0, int minTimeoutSeconds = 60, int maxTimeoutHours = 12)
+            double realtimeFactor = 6.0, int minTimeoutSeconds = 60, int maxTimeoutHours = 12,
+            string protocol = "auto", string audioFormat = "auto", int chunkSeconds = 0,
+            int audioBitrateKbps = 64)
         {
             _logger = logger;
             _apiUrl = apiUrl.TrimEnd('/');
@@ -49,6 +53,8 @@ namespace WhisperSubs.Providers
             _realtimeFactor = realtimeFactor;
             _minTimeoutSeconds = minTimeoutSeconds;
             _maxTimeoutHours = maxTimeoutHours;
+            _audioOptions = RemoteAudioOptions.Resolve(
+                protocol, _apiUrl, audioFormat, chunkSeconds, audioBitrateKbps);
 
             if (!string.IsNullOrEmpty(_apiKey) &&
                 Uri.TryCreate(_apiUrl, UriKind.Absolute, out var uri) &&
@@ -74,6 +80,25 @@ namespace WhisperSubs.Providers
             if (!File.Exists(audioPath))
             {
                 throw new FileNotFoundException($"Audio file not found: {audioPath}");
+            }
+
+            if (_audioOptions.IsOpenRouter)
+            {
+                if (translate)
+                {
+                    throw new NotSupportedException(
+                        "OpenRouter does not expose the /v1/audio/translations endpoint required by WhisperSubs. " +
+                        "Disable translation capability for this worker.");
+                }
+
+                return await TranscribeOpenRouterAsync(audioPath, language, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (_audioOptions.Format != RemoteAudioFormat.Wav || _audioOptions.ChunkSeconds > 0)
+            {
+                return await TranscribePreparedOpenAiAsync(
+                    audioPath, language, cancellationToken, translate).ConfigureAwait(false);
             }
 
             var endpoint = translate
@@ -113,6 +138,110 @@ namespace WhisperSubs.Providers
             return srt;
         }
 
+        private async Task<string> TranscribePreparedOpenAiAsync(
+            string audioPath,
+            string language,
+            CancellationToken cancellationToken,
+            bool translate)
+        {
+            var endpoint = translate
+                ? $"{_apiUrl}/v1/audio/translations"
+                : $"{_apiUrl}/v1/audio/transcriptions";
+            using var prepared = await RemoteAudioPreparer.PrepareAsync(
+                audioPath, _audioOptions, cancellationToken).ConfigureAwait(false);
+
+            var combined = new StringBuilder();
+            var nextIndex = 1;
+            foreach (var chunk in prepared.Chunks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using var content = CreateMultipartContent(chunk.Path, chunk.ContentType, chunk.FileName);
+                content.Add(new StringContent(_model), "model");
+                content.Add(new StringContent("srt"), "response_format");
+                AddLanguage(content, language);
+
+                var equivalentPcmBytes = (long)Math.Ceiling(
+                    chunk.SourceDurationSeconds * TranscriptionTimeout.BytesPerAudioSecond);
+                var chunkSrt = await PostAudioAsync(
+                    endpoint, content, equivalentPcmBytes, cancellationToken).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(chunkSrt))
+                    continue;
+
+                if (combined.Length > 0)
+                    combined.AppendLine().AppendLine();
+                combined.Append(WhisperProvider.OffsetSrt(
+                    chunkSrt, chunk.SourceStartSeconds, nextIndex));
+                nextIndex += WhisperProvider.CountSrtEntries(chunkSrt);
+            }
+
+            if (combined.Length == 0)
+                throw new InvalidOperationException("Remote Whisper API returned empty response");
+
+            return combined.ToString().TrimEnd();
+        }
+
+        private async Task<string> TranscribeOpenRouterAsync(
+            string audioPath,
+            string language,
+            CancellationToken cancellationToken)
+        {
+            var endpoint = $"{_apiUrl}/v1/audio/transcriptions";
+            using var prepared = await RemoteAudioPreparer.PrepareAsync(
+                audioPath, _audioOptions, cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Sending audio to OpenRouter in {ChunkCount} {Format} chunk(s) [lang={Language}]",
+                prepared.Chunks.Count,
+                _audioOptions.Extension,
+                language);
+
+            var srt = new StringBuilder();
+            var nextIndex = 1;
+            foreach (var chunk in prepared.Chunks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var uploadBytes = new FileInfo(chunk.Path).Length;
+                if (uploadBytes > 25_000_000)
+                {
+                    throw new InvalidOperationException(
+                        $"Prepared OpenRouter chunk is {uploadBytes / 1_000_000.0:F1} MB, above the 25 MB multipart limit. " +
+                        "Reduce the worker chunk duration or MP3 bitrate.");
+                }
+
+                using var content = CreateMultipartContent(chunk.Path, chunk.ContentType, chunk.FileName);
+                content.Add(new StringContent(_model), "model");
+                content.Add(new StringContent("verbose_json"), "response_format");
+                content.Add(new StringContent("segment"), "timestamp_granularities[]");
+                AddLanguage(content, language);
+
+                // The timeout policy is based on uncompressed audio duration, not compressed upload bytes.
+                var equivalentPcmBytes = (long)Math.Ceiling(
+                    chunk.SourceDurationSeconds * TranscriptionTimeout.BytesPerAudioSecond);
+                var json = await PostAudioAsync(
+                    endpoint, content, equivalentPcmBytes, cancellationToken).ConfigureAwait(false);
+                var transcription = OpenRouterTranscription.Parse(json);
+                OpenRouterTranscription.AppendSrt(
+                    srt,
+                    transcription.Segments,
+                    chunk.SourceStartSeconds,
+                    chunk.KeepStartSeconds,
+                    chunk.KeepEndSeconds,
+                    ref nextIndex);
+            }
+
+            if (srt.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "OpenRouter returned no timestamped segments. Select an OpenAI-compatible transcription " +
+                    "model/provider that supports response_format=verbose_json.");
+            }
+
+            _logger.LogInformation(
+                "OpenRouter transcription complete, received {EntryCount} subtitle entries",
+                nextIndex - 1);
+            return srt.ToString().TrimEnd();
+        }
+
         [ExcludeFromCodeCoverage(Justification = "HTTP I/O; the pure deadline policy is tested in TranscriptionTimeoutTests")]
         public async Task<(string Language, float Probability)> DetectLanguageAsync(string audioPath, CancellationToken cancellationToken)
         {
@@ -125,10 +254,7 @@ namespace WhisperSubs.Providers
 
             long audioBytes = new FileInfo(audioPath).Length;
 
-            using var content = new MultipartFormDataContent();
-            var fileContent = new StreamContent(File.OpenRead(audioPath));
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
-            content.Add(fileContent, "file", "audio.wav");
+            using var content = CreateMultipartContent(audioPath, "audio/wav", "audio.wav");
 
             content.Add(new StringContent(_model), "model");
             content.Add(new StringContent("verbose_json"), "response_format");
@@ -136,18 +262,45 @@ namespace WhisperSubs.Providers
             var endpoint = $"{_apiUrl}/v1/audio/transcriptions";
             var json = await PostAudioAsync(endpoint, content, audioBytes, cancellationToken).ConfigureAwait(false);
 
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            var language = root.TryGetProperty("language", out var langProp)
-                ? (langProp.GetString() ?? "auto")
-                : "auto";
+            var language = _audioOptions.IsOpenRouter
+                ? OpenRouterTranscription.Parse(json).Language
+                : ParseLanguage(json);
 
             language = NormalizeLangName(language);
 
             _logger.LogInformation("Remote language detection: {Language}", language);
 
             return (language, 0.0f);
+        }
+
+        private static MultipartFormDataContent CreateMultipartContent(
+            string audioPath,
+            string contentType,
+            string fileName)
+        {
+            var content = new MultipartFormDataContent();
+            var fileContent = new StreamContent(File.OpenRead(audioPath));
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+            content.Add(fileContent, "file", fileName);
+            return content;
+        }
+
+        private static void AddLanguage(MultipartFormDataContent content, string language)
+        {
+            if (!string.IsNullOrWhiteSpace(language)
+                && !string.Equals(language, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                content.Add(new StringContent(language), "language");
+            }
+        }
+
+        private static string ParseLanguage(string json)
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            return root.TryGetProperty("language", out var langProp)
+                ? langProp.GetString() ?? "auto"
+                : "auto";
         }
 
         /// <summary>

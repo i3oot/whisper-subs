@@ -487,7 +487,9 @@ namespace WhisperSubs.Controller
                 await ExtractAudioAsync(mediaPath, tempAudioPath, lang, cancellationToken, resumeOffsetSeconds);
                 SubtitleQueueService.Instance.ReportPhase("Transcribing");
                 string srtContent = await provider.TranscribeAsync(tempAudioPath, lang, cancellationToken);
-                srtContent = await ApplyTimingCorrectionsAsync(srtContent, mediaPath, tempAudioPath, resumeOffsetSeconds > 0, provider.UsesVad, cancellationToken);
+                srtContent = await ApplyTimingCorrectionsAsync(
+                    srtContent, mediaPath, tempAudioPath, resumeOffsetSeconds > 0,
+                    provider.UsesVad, provider is RemoteWhisperProvider, cancellationToken);
 
                 if (resumeOffsetSeconds > 0 && !string.IsNullOrWhiteSpace(existingSrt))
                 {
@@ -688,7 +690,11 @@ namespace WhisperSubs.Controller
                 await ExtractAudioAsync(mediaPath, tempAudioPath, sourceLanguage, cancellationToken);
                 SubtitleQueueService.Instance.ReportPhase("Translating to English");
                 string srtContent = await provider.TranscribeAsync(tempAudioPath, sourceLanguage, cancellationToken, translate: true);
-                srtContent = await ApplyTimingCorrectionsAsync(srtContent, mediaPath, tempAudioPath, isResume: false, providerUsesVad: provider.UsesVad, cancellationToken);
+                srtContent = await ApplyTimingCorrectionsAsync(
+                    srtContent, mediaPath, tempAudioPath, isResume: false,
+                    providerUsesVad: provider.UsesVad,
+                    providerUsesRemoteTimestamps: provider is RemoteWhisperProvider,
+                    ct: cancellationToken);
 
                 await WriteTextAtomicAsync(translatedSrtPath, srtContent, CancellationToken.None);
                 _logger.LogInformation("Saved translated subtitle to {SrtPath}", translatedSrtPath);
@@ -1923,7 +1929,8 @@ namespace WhisperSubs.Controller
         /// on the 0-based fresh SRT, which matches the 0-based silence segments).</param>
         [ExcludeFromCodeCoverage(Justification = "Orchestrates FFprobe/FFmpeg processes for timing correction")]
         private async Task<string> ApplyTimingCorrectionsAsync(
-            string srtContent, string mediaPath, string audioPath, bool isResume, bool providerUsesVad, CancellationToken ct)
+            string srtContent, string mediaPath, string audioPath, bool isResume, bool providerUsesVad,
+            bool providerUsesRemoteTimestamps, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(srtContent)) return srtContent;
 
@@ -1931,7 +1938,7 @@ namespace WhisperSubs.Controller
 
             // These corrections operate on locally-generated whisper-cli output only. A remote API
             // server returns its own timestamps, so don't re-time them (and don't spend local CPU).
-            if (!string.IsNullOrWhiteSpace(config?.RemoteWhisperApiUrl)) return srtContent;
+            if (providerUsesRemoteTimestamps) return srtContent;
 
             // Feature 3: compensate for a non-zero audio stream start_time. Skipped on resume
             // (see isResume) — the existing SRT already carried it and the tail is re-anchored

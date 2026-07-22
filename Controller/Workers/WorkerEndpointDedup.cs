@@ -127,6 +127,10 @@ namespace WhisperSubs.Controller.Workers
             MaxConcurrency = w.MaxConcurrency,
             CostWeight = w.CostWeight,
             CanTranslate = w.CanTranslate,
+            Protocol = w.Protocol,
+            AudioFormat = w.AudioFormat,
+            ChunkSeconds = w.ChunkSeconds,
+            AudioBitrateKbps = w.AudioBitrateKbps,
         };
     }
 }

@@ -241,7 +241,8 @@ namespace WhisperSubs.Controller
                     segments.Add(
                         $"w[{id}|{w.ApiUrl.Trim()}|{(w.Model ?? string.Empty).Trim()}|" +
                         $"{(w.MaxConcurrency < 1 ? 1 : w.MaxConcurrency)}|" +
-                        $"{w.CostWeight.ToString(System.Globalization.CultureInfo.InvariantCulture)}|{w.CanTranslate}];");
+                        $"{w.CostWeight.ToString(System.Globalization.CultureInfo.InvariantCulture)}|{w.CanTranslate}|" +
+                        $"{w.Protocol}|{w.AudioFormat}|{w.ChunkSeconds}|{w.AudioBitrateKbps}];");
                 }
                 foreach (var seg in segments.OrderBy(s => s, System.StringComparer.Ordinal))
                     sb.Append(seg);

@@ -1794,6 +1794,30 @@
                     row.appendChild(WhisperSubsConfig._workerField(
                         'Model (optional)', 'text', 'wkModel', { placeholder: 'server default', maxlength: '256' },
                         w.Model || '', 'Model to request. Blank uses the worker default.'));
+                    row.appendChild(WhisperSubsConfig._workerSelect(
+                        'API protocol', 'wkProtocol', [
+                            { value: 'auto', label: 'Auto-detect' },
+                            { value: 'openai', label: 'OpenAI-compatible (SRT)' },
+                            { value: 'openrouter', label: 'OpenRouter (timestamped JSON)' }
+                        ], w.Protocol || 'auto',
+                        'Auto-detect recognises openrouter.ai. OpenRouter returns timestamped JSON, which WhisperSubs converts to SRT.'));
+                    row.appendChild(WhisperSubsConfig._workerSelect(
+                        'Upload audio format', 'wkAudioFormat', [
+                            { value: 'auto', label: 'Automatic' },
+                            { value: 'wav', label: 'WAV (uncompressed)' },
+                            { value: 'mp3', label: 'MP3 (compressed)' }
+                        ], w.AudioFormat || 'auto',
+                        'Automatic uses MP3 for OpenRouter and WAV for existing/self-hosted workers.'));
+                    row.appendChild(WhisperSubsConfig._workerField(
+                        'Chunk duration (seconds)', 'number', 'wkChunkSeconds',
+                        { min: '0', max: '3600', step: '1', placeholder: '0' },
+                        (w.ChunkSeconds != null && w.ChunkSeconds > 0) ? w.ChunkSeconds : '0',
+                        '0 = automatic: OpenRouter uses 600-second chunks; other workers remain unchunked.'));
+                    row.appendChild(WhisperSubsConfig._workerField(
+                        'MP3 bitrate (kbit/s)', 'number', 'wkBitrate',
+                        { min: '16', max: '320', step: '1', placeholder: '64' },
+                        (w.AudioBitrateKbps != null && w.AudioBitrateKbps >= 16) ? w.AudioBitrateKbps : '64',
+                        '64 kbit/s is compact and appropriate for speech transcription.'));
                     row.appendChild(WhisperSubsConfig._workerField(
                         'Max concurrency', 'number', 'wkConcurrency', { min: '1', max: '64', step: '1', placeholder: '1' },
                         (w.MaxConcurrency != null && w.MaxConcurrency >= 1) ? w.MaxConcurrency : '',
@@ -1805,6 +1829,15 @@
 
                     row.appendChild(WhisperSubsConfig._workerCheckbox('wkTranslate', 'Can translate to English', w.CanTranslate !== false));
                     row.appendChild(WhisperSubsConfig._workerCheckbox('wkEnabled', 'Enabled', w.Enabled !== false));
+
+                    var protocolSelect = row.querySelector('.wkProtocol');
+                    if (protocolSelect) {
+                        protocolSelect.addEventListener('change', function () {
+                            if (protocolSelect.value === 'openrouter') {
+                                row.querySelector('.wkTranslate').checked = false;
+                            }
+                        });
+                    }
 
                     // Re-check for duplicate endpoints whenever this row's URL or Enabled state changes.
                     var dupUrlInput = row.querySelector('.wkUrl');
@@ -1885,6 +1918,36 @@
                     return container;
                 },
 
+                _workerSelect: function (labelText, cls, options, value, descText) {
+                    var id = 'wk_' + (++WhisperSubsConfig._workerSeq);
+                    var container = document.createElement('div');
+                    container.className = 'selectContainer';
+                    var label = document.createElement('label');
+                    label.className = 'selectLabel';
+                    label.setAttribute('for', id);
+                    label.textContent = labelText;
+                    container.appendChild(label);
+                    var select = document.createElement('select');
+                    select.id = id;
+                    select.className = 'emby-select ' + cls;
+                    select.setAttribute('is', 'emby-select');
+                    options.forEach(function (optionSpec) {
+                        var option = document.createElement('option');
+                        option.value = optionSpec.value;
+                        option.textContent = optionSpec.label;
+                        select.appendChild(option);
+                    });
+                    select.value = value;
+                    container.appendChild(select);
+                    if (descText) {
+                        var desc = document.createElement('div');
+                        desc.className = 'fieldDescription';
+                        desc.textContent = descText;
+                        container.appendChild(desc);
+                    }
+                    return container;
+                },
+
                 _workerCheckbox: function (cls, labelText, checked) {
                     var container = document.createElement('div');
                     container.className = 'checkboxContainer';
@@ -1913,6 +1976,10 @@
                         var url = (row.querySelector('.wkUrl').value || '').trim();
                         var key = (row.querySelector('.wkKey').value || '').trim();
                         var model = (row.querySelector('.wkModel').value || '').trim();
+                        var protocol = (row.querySelector('.wkProtocol').value || 'auto').trim();
+                        var audioFormat = (row.querySelector('.wkAudioFormat').value || 'auto').trim();
+                        var chunkRaw = (row.querySelector('.wkChunkSeconds').value || '0').trim();
+                        var bitrateRaw = (row.querySelector('.wkBitrate').value || '64').trim();
                         var concRaw = (row.querySelector('.wkConcurrency').value || '').trim();
                         var costRaw = (row.querySelector('.wkCost').value || '').trim();
                         var canTranslate = row.querySelector('.wkTranslate').checked;
@@ -1927,6 +1994,10 @@
                         if (isNaN(conc) || conc < 1) conc = 1;
                         var cost = parseFloat(costRaw);
                         if (isNaN(cost) || cost < 0) cost = 0;
+                        var chunkSeconds = parseInt(chunkRaw, 10);
+                        if (isNaN(chunkSeconds) || chunkSeconds < 0) chunkSeconds = 0;
+                        var bitrate = parseInt(bitrateRaw, 10);
+                        if (isNaN(bitrate) || bitrate < 16 || bitrate > 320) bitrate = 64;
 
                         workers.push({
                             Id: row.getAttribute('data-worker-id') || WhisperSubsConfig.genWorkerId(),
@@ -1937,7 +2008,11 @@
                             Model: model,
                             MaxConcurrency: conc,
                             CostWeight: cost,
-                            CanTranslate: canTranslate
+                            CanTranslate: canTranslate,
+                            Protocol: protocol,
+                            AudioFormat: audioFormat,
+                            ChunkSeconds: chunkSeconds,
+                            AudioBitrateKbps: bitrate
                         });
                     });
                     return workers;
@@ -1951,6 +2026,7 @@
                     var url = (row.querySelector('.wkUrl').value || '').trim();
                     var key = (row.querySelector('.wkKey').value || '').trim();
                     var model = (row.querySelector('.wkModel').value || '').trim();
+                    var protocol = (row.querySelector('.wkProtocol').value || 'auto').trim();
                     if (!url) {
                         if (result) { result.textContent = 'Enter an endpoint URL first.'; result.style.color = '#CC7B19'; }
                         return;
@@ -1960,7 +2036,7 @@
                     ApiClient.ajax({
                         type: 'POST',
                         url: ApiClient.getUrl('Plugins/WhisperSubs/Workers/TestConnection'),
-                        data: JSON.stringify({ apiUrl: url, apiKey: key, model: model }),
+                        data: JSON.stringify({ apiUrl: url, apiKey: key, model: model, protocol: protocol }),
                         contentType: 'application/json',
                         dataType: 'json'
                     }).then(function (response) {

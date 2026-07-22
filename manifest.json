@@ -4,7 +4,7 @@
     "name": "WhisperSubs",
     "description": "Automated subtitle generation for Jellyfin using local Whisper AI models.",
     "overview": "Generate subtitles for your media library using local speech-to-text AI (whisper.cpp). Supports CPU and GPU-accelerated transcription. All processing happens locally on your server.",
-    "owner": "GeiserX",
+    "owner": "i3oot",
     "category": "Subtitles",
     "versions": [
       {

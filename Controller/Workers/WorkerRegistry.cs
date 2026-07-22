@@ -42,10 +42,14 @@ namespace WhisperSubs.Controller.Workers
                             name: string.IsNullOrWhiteSpace(w.Name) ? w.ApiUrl : w.Name,
                             url: w.ApiUrl,
                             key: w.ApiKey ?? string.Empty,
-                            model: string.IsNullOrWhiteSpace(w.Model) ? config.RemoteWhisperModel : w.Model,
+                            model: w.Model,
                             maxConcurrency: w.MaxConcurrency,
                             costWeight: w.CostWeight,
                             canTranslate: w.CanTranslate,
+                            protocol: w.Protocol,
+                            audioFormat: w.AudioFormat,
+                            chunkSeconds: w.ChunkSeconds,
+                            audioBitrateKbps: w.AudioBitrateKbps,
                             config: config,
                             loggerFactory: loggerFactory));
                     }
@@ -59,6 +63,7 @@ namespace WhisperSubs.Controller.Workers
                         key: (config.RemoteWhisperApiKey ?? string.Empty).Trim(),
                         model: config.RemoteWhisperModel,
                         maxConcurrency: 1, costWeight: 0, canTranslate: true,
+                        protocol: "auto", audioFormat: "auto", chunkSeconds: 0, audioBitrateKbps: 64,
                         config: config, loggerFactory: loggerFactory));
                     break;
             }
@@ -79,20 +84,31 @@ namespace WhisperSubs.Controller.Workers
         private static ITranscriptionWorker BuildRemote(
             string id, string name, string url, string key, string model,
             int maxConcurrency, double costWeight, bool canTranslate,
+            string protocol, string audioFormat, int chunkSeconds, int audioBitrateKbps,
             PluginConfiguration config, ILoggerFactory loggerFactory)
         {
-            var resolvedModel = string.IsNullOrWhiteSpace(model) ? "Systran/faster-whisper-large-v3" : model.Trim();
+            var remoteOptions = RemoteAudioOptions.Resolve(
+                protocol, url, audioFormat, chunkSeconds, audioBitrateKbps);
+            var configuredModel = string.IsNullOrWhiteSpace(model) ? config.RemoteWhisperModel : model.Trim();
+            var resolvedModel = remoteOptions.IsOpenRouter
+                && (string.IsNullOrWhiteSpace(configuredModel)
+                    || string.Equals(configuredModel, "Systran/faster-whisper-large-v3", System.StringComparison.OrdinalIgnoreCase))
+                ? "openai/whisper-large-v3"
+                : string.IsNullOrWhiteSpace(configuredModel)
+                    ? "Systran/faster-whisper-large-v3"
+                    : configuredModel;
             var provider = new RemoteWhisperProvider(
                 loggerFactory.CreateLogger<RemoteWhisperProvider>(),
                 url, resolvedModel, key,
-                config.JobTimeoutRealtimeFactor, config.JobMinTimeoutSeconds, config.JobMaxTimeoutHours);
+                config.JobTimeoutRealtimeFactor, config.JobMinTimeoutSeconds, config.JobMaxTimeoutHours,
+                protocol, audioFormat, chunkSeconds, audioBitrateKbps);
 
             return new TranscriptionWorker(id, name, provider, new WorkerCapabilities
             {
                 IsLocal = false,
                 CostWeight = costWeight,
                 MaxConcurrency = maxConcurrency < 1 ? 1 : maxConcurrency,
-                CanTranslate = canTranslate
+                CanTranslate = canTranslate && !remoteOptions.IsOpenRouter
             });
         }
     }
