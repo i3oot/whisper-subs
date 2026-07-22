@@ -208,11 +208,12 @@ namespace WhisperSubs.Providers
                         "Reduce the worker chunk duration or MP3 bitrate.");
                 }
 
-                using var content = CreateMultipartContent(chunk.Path, chunk.ContentType, chunk.FileName);
-                content.Add(new StringContent(_model), "model");
-                content.Add(new StringContent("verbose_json"), "response_format");
-                content.Add(new StringContent("segment"), "timestamp_granularities[]");
-                AddLanguage(content, language);
+                using var content = await OpenRouterRequest.CreateContentAsync(
+                    chunk.Path,
+                    _model,
+                    _audioOptions.Extension,
+                    language,
+                    cancellationToken).ConfigureAwait(false);
 
                 // The timeout policy is based on uncompressed audio duration, not compressed upload bytes.
                 var equivalentPcmBytes = (long)Math.Ceiling(
@@ -254,6 +255,29 @@ namespace WhisperSubs.Providers
 
             long audioBytes = new FileInfo(audioPath).Length;
 
+            if (_audioOptions.IsOpenRouter)
+            {
+                using var prepared = await RemoteAudioPreparer.PrepareAsync(
+                    audioPath, _audioOptions, cancellationToken).ConfigureAwait(false);
+                var chunk = prepared.Chunks[0];
+                using var openRouterContent = await OpenRouterRequest.CreateContentAsync(
+                    chunk.Path,
+                    _model,
+                    _audioOptions.Extension,
+                    "auto",
+                    cancellationToken).ConfigureAwait(false);
+                var equivalentPcmBytes = (long)Math.Ceiling(
+                    chunk.SourceDurationSeconds * TranscriptionTimeout.BytesPerAudioSecond);
+                var openRouterJson = await PostAudioAsync(
+                    $"{_apiUrl}/v1/audio/transcriptions",
+                    openRouterContent,
+                    equivalentPcmBytes,
+                    cancellationToken).ConfigureAwait(false);
+                var openRouterLanguage = NormalizeLangName(OpenRouterTranscription.Parse(openRouterJson).Language);
+                _logger.LogInformation("Remote language detection: {Language}", openRouterLanguage);
+                return (openRouterLanguage, 0.0f);
+            }
+
             using var content = CreateMultipartContent(audioPath, "audio/wav", "audio.wav");
 
             content.Add(new StringContent(_model), "model");
@@ -262,9 +286,7 @@ namespace WhisperSubs.Providers
             var endpoint = $"{_apiUrl}/v1/audio/transcriptions";
             var json = await PostAudioAsync(endpoint, content, audioBytes, cancellationToken).ConfigureAwait(false);
 
-            var language = _audioOptions.IsOpenRouter
-                ? OpenRouterTranscription.Parse(json).Language
-                : ParseLanguage(json);
+            var language = ParseLanguage(json);
 
             language = NormalizeLangName(language);
 
@@ -304,14 +326,14 @@ namespace WhisperSubs.Providers
         }
 
         /// <summary>
-        /// POSTs a prepared multipart body under a per-call deadline derived from the audio length
+        /// POSTs a prepared request body under a per-call deadline derived from the audio length
         /// (<see cref="TranscriptionTimeout"/>). A caller cancellation propagates as
         /// <see cref="OperationCanceledException"/>; the deadline elapsing surfaces as a
         /// <see cref="TimeoutException"/> so a stalled/unreachable endpoint fails fast and clearly instead
         /// of hanging (the multi-day stuck-task class of bug).
         /// </summary>
         [ExcludeFromCodeCoverage(Justification = "HTTP I/O; the pure deadline policy is tested in TranscriptionTimeoutTests")]
-        private async Task<string> PostAudioAsync(string endpoint, MultipartFormDataContent content, long audioBytes, CancellationToken cancellationToken)
+        private async Task<string> PostAudioAsync(string endpoint, HttpContent content, long audioBytes, CancellationToken cancellationToken)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = content };
             ApplyAuthorization(request);

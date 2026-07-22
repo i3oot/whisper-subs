@@ -453,14 +453,9 @@ namespace WhisperSubs.Api
                 }
             }
 
-            using var content = new System.Net.Http.MultipartFormDataContent();
-            var fileContent = new System.Net.Http.ByteArrayContent(wav);
-            fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
-            content.Add(fileContent, "file", "test.wav");
-            content.Add(new System.Net.Http.StringContent(model), "model");
-            content.Add(
-                new System.Net.Http.StringContent(isOpenRouter ? "json" : "srt"),
-                "response_format");
+            using System.Net.Http.HttpContent content = isOpenRouter
+                ? Providers.OpenRouterRequest.CreateContent(wav, model, "wav", "auto")
+                : CreateMultipartProbe(wav, model);
 
             using var probe = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, url) { Content = content };
             if (!string.IsNullOrWhiteSpace(worker.ApiKey))
@@ -510,6 +505,17 @@ namespace WhisperSubs.Api
                 // Never throw — the endpoint contract is an always-shaped {ok, warning, ...} result.
                 sw.Stop();
                 return Ok(new { ok = false, warning = false, latencyMs = sw.ElapsedMilliseconds, message = $"Unreachable: {ex.Message}" });
+            }
+
+            static System.Net.Http.MultipartFormDataContent CreateMultipartProbe(byte[] audio, string requestedModel)
+            {
+                var multipart = new System.Net.Http.MultipartFormDataContent();
+                var fileContent = new System.Net.Http.ByteArrayContent(audio);
+                fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
+                multipart.Add(fileContent, "file", "test.wav");
+                multipart.Add(new System.Net.Http.StringContent(requestedModel), "model");
+                multipart.Add(new System.Net.Http.StringContent("srt"), "response_format");
+                return multipart;
             }
         }
 
